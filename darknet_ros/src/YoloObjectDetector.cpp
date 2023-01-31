@@ -45,6 +45,7 @@ YoloObjectDetector::~YoloObjectDetector() {
   yoloThread_.join();
 }
 
+
 bool YoloObjectDetector::readParameters() {
   // Load common parameters.
   nodeHandle_.param("image_view/enable_opencv", viewImage_, true);
@@ -71,6 +72,7 @@ bool YoloObjectDetector::readParameters() {
 
 void YoloObjectDetector::init() {
   ROS_INFO("[YoloObjectDetector] init().");
+  flag_detection_ = false;
 
   // Initialize deep network of darknet.
   std::string weightsPath;
@@ -112,7 +114,7 @@ void YoloObjectDetector::init() {
 
   // Load network.
   setupNetwork(cfg, weights, data, thresh, detectionNames, numClasses_, 0, 0, 1, 0.5, 0, 0, 0, 0);
-  yoloThread_ = std::thread(&YoloObjectDetector::yolo, this);
+  //yoloThread_ = std::thread(&YoloObjectDetector::yolo, this);
 
   // Initialize publisher and subscriber.
   std::string cameraTopicName;
@@ -147,6 +149,9 @@ void YoloObjectDetector::init() {
   detectionImagePublisher_ =
       nodeHandle_.advertise<sensor_msgs::Image>(detectionImageTopicName, detectionImageQueueSize, detectionImageLatch);
 
+      //Service Server
+  boundingBoxesServer_ = nodeHandle_.advertiseService("check_for_objects_server", &YoloObjectDetector::serviceCallback, this);
+
   // Action servers.
   std::string checkForObjectsActionName;
   nodeHandle_.param("actions/camera_reading/topic", checkForObjectsActionName, std::string("check_for_objects"));
@@ -154,6 +159,49 @@ void YoloObjectDetector::init() {
   checkForObjectsActionServer_->registerGoalCallback(boost::bind(&YoloObjectDetector::checkForObjectsActionGoalCB, this));
   checkForObjectsActionServer_->registerPreemptCallback(boost::bind(&YoloObjectDetector::checkForObjectsActionPreemptCB, this));
   checkForObjectsActionServer_->start();
+}
+
+bool YoloObjectDetector::serviceCallback(darknet_ros_msgs::checkForObjects::Request  &req, darknet_ros_msgs::checkForObjects::Response &res)
+{
+  //yoloThread_ = std::thread(&YoloObjectDetector::yolo, this);
+  yoloThread_ = std::thread(&YoloObjectDetector::yolo, this);
+
+  sensor_msgs::Image imageAction = req.image;
+  
+  cv_bridge::CvImagePtr cam_image;
+
+  try {
+    cam_image = cv_bridge::toCvCopy(imageAction, sensor_msgs::image_encodings::BGR8);
+  } catch (cv_bridge::Exception& e) {
+    ROS_ERROR("cv_bridge exception: %s", e.what());
+    return false;
+  }
+
+  if (cam_image) {
+    {
+      boost::unique_lock<boost::shared_mutex> lockImageCallback(mutexImageCallback_);
+      camImageCopy_ = cam_image->image.clone();
+    }
+    {
+      boost::unique_lock<boost::shared_mutex> lockImageCallback(mutexActionStatus_);
+      actionId_ = 0;
+    }
+    {
+      boost::unique_lock<boost::shared_mutex> lockImageStatus(mutexImageStatus_);
+      imageStatus_ = true;
+    }
+    frameWidth_ = cam_image->image.size().width;
+    frameHeight_ = cam_image->image.size().height;
+
+    yoloThread_.join();
+    
+
+    res.bounding_boxes = boundingBoxes_;
+    return true;
+    
+  }
+
+  return false;
 }
 
 void YoloObjectDetector::cameraCallback(const sensor_msgs::ImageConstPtr& msg) {
@@ -198,6 +246,8 @@ void YoloObjectDetector::cameraCallback(const sensor_msgs::ImageConstPtr& msg) {
 void YoloObjectDetector::checkForObjectsActionGoalCB() {
   ROS_DEBUG("[YoloObjectDetector] Start check for objects action.");
 
+  yoloThread_ = std::thread(&YoloObjectDetector::yolo, this);
+
   boost::shared_ptr<const darknet_ros_msgs::CheckForObjectsGoal> imageActionPtr = checkForObjectsActionServer_->acceptNewGoal();
   sensor_msgs::Image imageAction = imageActionPtr->image;
 
@@ -225,13 +275,16 @@ void YoloObjectDetector::checkForObjectsActionGoalCB() {
     }
     frameWidth_ = cam_image->image.size().width;
     frameHeight_ = cam_image->image.size().height;
+    
   }
+  
   return;
 }
 
 void YoloObjectDetector::checkForObjectsActionPreemptCB() {
   ROS_DEBUG("[YoloObjectDetector] Preempt check for objects action.");
   checkForObjectsActionServer_->setPreempted();
+  
 }
 
 bool YoloObjectDetector::isCheckingForObjects() const {
@@ -373,6 +426,7 @@ void* YoloObjectDetector::detectInThread() {
   free_detections(dets, nboxes);
   demoIndex_ = (demoIndex_ + 1) % demoFrame_;
   running_ = 0;
+  std::cout <<"YoloObjectDetector::detectInThread" << std::endl;
   return 0;
 }
 
@@ -387,6 +441,7 @@ void* YoloObjectDetector::fetchInThread() {
   }
   rgbgr_image(buff_[buffIndex_]);
   letterbox_image_into(buff_[buffIndex_], net_->w, net_->h, buffLetter_[buffIndex_]);
+  std::cout <<"YoloObjectDetector::fetchInThread" << std::endl;
   return 0;
 }
 
@@ -494,6 +549,8 @@ void YoloObjectDetector::yolo() {
   demoTime_ = what_time_is_it_now();
 
   while (!demoDone_) {
+    
+    std::cout<< " sono in while (!demoDone_)" << std::endl;
     buffIndex_ = (buffIndex_ + 1) % 3;
     fetch_thread = std::thread(&YoloObjectDetector::fetchInThread, this);
     detect_thread = std::thread(&YoloObjectDetector::detectInThread, this);
@@ -516,6 +573,11 @@ void YoloObjectDetector::yolo() {
     ++count;
     if (!isNodeRunning()) {
       demoDone_ = true;
+    }
+  if(flag_detection_)
+    {
+      flag_detection_ = false;
+      return;
     }
   }
 }
@@ -554,6 +616,7 @@ void* YoloObjectDetector::publishInThread() {
       }
     }
 
+
     darknet_ros_msgs::ObjectCount msg;
     msg.header.stamp = ros::Time::now();
     msg.header.frame_id = "detection";
@@ -585,14 +648,19 @@ void* YoloObjectDetector::publishInThread() {
     boundingBoxesResults_.header.frame_id = "detection";
     boundingBoxesResults_.image_header = headerBuff_[(buffIndex_ + 1) % 3];
     boundingBoxesPublisher_.publish(boundingBoxesResults_);
+    boundingBoxes_ = boundingBoxesResults_;
+    std::cout << "num di obj : "<< boundingBoxesResults_.bounding_boxes.size()<< std::endl;
+    flag_detection_ = true;
   } else {
     darknet_ros_msgs::ObjectCount msg;
     msg.header.stamp = ros::Time::now();
     msg.header.frame_id = "detection";
     msg.count = 0;
     objectPublisher_.publish(msg);
+    
+
   }
-  if (isCheckingForObjects()) {
+  if (isCheckingForObjects() && flag_detection_) {
     ROS_DEBUG("[YoloObjectDetector] check for objects in image.");
     darknet_ros_msgs::CheckForObjectsResult objectsActionResult;
     objectsActionResult.id = buffId_[0];

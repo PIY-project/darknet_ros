@@ -25,6 +25,7 @@
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/image_encodings.h>
 #include <std_msgs/Header.h>
+#include <std_srvs/Empty.h>
 
 // OpenCv
 #include <cv_bridge/cv_bridge.h>
@@ -37,6 +38,8 @@
 #include <darknet_ros_msgs/BoundingBoxes.h>
 #include <darknet_ros_msgs/CheckForObjectsAction.h>
 #include <darknet_ros_msgs/ObjectCount.h>
+#include <darknet_ros_msgs/checkForObjects.h>
+
 
 // Darknet.
 #ifdef GPU
@@ -106,6 +109,8 @@ class YoloObjectDetector {
    */
   void cameraCallback(const sensor_msgs::ImageConstPtr& msg);
 
+  bool serviceCallback(darknet_ros_msgs::checkForObjects::Request  &req, darknet_ros_msgs::checkForObjects::Response &res);
+
   /*!
    * Check for objects action goal callback.
    */
@@ -154,6 +159,7 @@ class YoloObjectDetector {
   std::vector<std::vector<RosBox_> > rosBoxes_;
   std::vector<int> rosBoxCounter_;
   darknet_ros_msgs::BoundingBoxes boundingBoxesResults_;
+  darknet_ros_msgs::BoundingBoxes boundingBoxes_;
 
   //! Camera related parameters.
   int frameWidth_;
@@ -161,6 +167,8 @@ class YoloObjectDetector {
 
   //! Publisher of the bounding box image.
   ros::Publisher detectionImagePublisher_;
+
+  ros::ServiceServer boundingBoxesServer_;
 
   // Yolo running on thread.
   std::thread yoloThread_;
@@ -211,6 +219,9 @@ class YoloObjectDetector {
 
   int actionId_;
   boost::shared_mutex mutexActionStatus_;
+
+  bool flag_detection_;
+  bool kill_thread_;
 
   // double getWallTime();
 
